@@ -66,31 +66,32 @@ RUN curl -fsSL \
 #     names without them; only line numbers are lost.
 #   - *.xml under ref/ (none in v4 tarball, but kept for forward-compat).
 #
-# iter-5 prune levers (all safe on Linux/x64; rationale per file):
+# iter-5 prune levers (only the ones verified safe on squirttle):
 #   - UI/*.map (11 MB): SPA source maps. Used only by browser dev tools to
 #     debug minified JS. Sonarr functionality unaffected.
 #   - ServiceInstall, ServiceUninstall (~160 KB total): Windows service
-#     installer binaries. Never invoked on Linux.
-#   - Microsoft.AspNetCore.Server.HttpSys.dll, Microsoft.AspNetCore.Server.IIS*.dll:
-#     Windows HTTP.SYS / IIS integration. Sonarr uses Kestrel on Linux.
-#   - Microsoft.Win32.Registry.dll, Microsoft.Win32.SystemEvents.dll:
-#     Windows registry / system events. Linux has neither.
-#   - Microsoft.VisualBasic*.dll: VB.NET runtime. Sonarr is C#.
-#   - WindowsBase.dll, System.Windows*.dll: WPF / Windows Forms runtime.
-#   - System.ServiceProcess*.dll: Windows service hosting.
-#   - System.Diagnostics.EventLog.dll, Microsoft.Extensions.Logging.EventLog.dll,
-#     Microsoft.Extensions.Hosting.WindowsServices.dll: Windows-only logging.
-#   - System.Data.SqlServerCe.dll, Microsoft.Data.SqlClient.dll (~1.5 MB):
-#     SQL Server Compact / SQL Server clients. Sonarr uses SQLite (or
-#     optionally PostgreSQL via Npgsql.dll which we keep).
+#     installer ELF binaries. Not referenced by Sonarr.deps.json on Linux.
 #
-# What we deliberately DON'T prune (would break things):
+# REJECTED prunes (caused SIGSEGV at startup on squirttle 2026-04-25):
+#   - Microsoft.Win32.Registry.dll, Microsoft.Win32.SystemEvents.dll
+#   - Microsoft.AspNetCore.Server.HttpSys.dll, IIS*.dll
+#   - Microsoft.VisualBasic*.dll, WindowsBase.dll, System.Windows*.dll
+#   - System.ServiceProcess*.dll, System.Diagnostics.EventLog.dll
+#   - Microsoft.Data.SqlClient.dll, System.Data.SqlServerCe.dll
+#   - Microsoft.Extensions.Hosting.WindowsServices.dll
+#   - Microsoft.Extensions.Logging.EventLog.dll
+# These are all "Windows-only" by name but are referenced from Sonarr's
+# deps.json (or transitively via Microsoft.AspNetCore.App / NETCore.App
+# manifests). When .NET 6's libcoreclr/libhostfxr fails to resolve them, it
+# crashes with no stdout (exit 139, plain SIGSEGV). LSIO doesn't prune any
+# of these. Trying to be smarter than Microsoft's deps graph loses.
+#
+# Other deliberately unpruned items:
 #   - ffprobe (16 MB): Sonarr's media analyzer. Removing it disables
 #     "Analyse video files" — homelab Sonarr uses this for custom format
-#     quality detection. iter-5b (no-ffprobe) is documented in README as
-#     an option for users who don't need media analysis.
+#     quality detection. Documented in README as an iter-5b option for
+#     users who don't need media analysis.
 #   - Sonarr.Mono.dll: small (27 KB) shim referenced by Sonarr.deps.json.
-#     Even though we run .NET Core, the deps graph loads it; safer to keep.
 #   - System.Drawing.Common.dll: poster/banner thumbnail generation might
 #     P/Invoke libgdiplus. Untested; kept to be safe.
 RUN set -eux; \
@@ -99,26 +100,8 @@ RUN set -eux; \
     find . -name '*.pdb' -type f -delete; \
     find . -name '*.xml' -path '*/ref/*' -type f -delete 2>/dev/null || true; \
     rm -rf logs MediaCover .git .github 2>/dev/null || true; \
-    # iter-5 prune levers — see comment block above.
     rm -f UI/*.map; \
-    rm -f ServiceInstall ServiceUninstall; \
-    rm -f Microsoft.AspNetCore.Server.HttpSys.dll \
-          Microsoft.AspNetCore.Server.IIS.dll \
-          Microsoft.AspNetCore.Server.IISIntegration.dll \
-          Microsoft.Win32.Registry.dll \
-          Microsoft.Win32.SystemEvents.dll \
-          Microsoft.VisualBasic.Core.dll \
-          Microsoft.VisualBasic.dll \
-          WindowsBase.dll \
-          System.Windows.dll \
-          System.Windows.Extensions.dll \
-          System.ServiceProcess.dll \
-          System.ServiceProcess.ServiceController.dll \
-          System.Diagnostics.EventLog.dll \
-          Microsoft.Extensions.Hosting.WindowsServices.dll \
-          Microsoft.Extensions.Logging.EventLog.dll \
-          System.Data.SqlServerCe.dll \
-          Microsoft.Data.SqlClient.dll
+    rm -f ServiceInstall ServiceUninstall
 
 # Write a package_info file matching LSIO's convention so Sonarr knows it was
 # installed via Docker and disables in-app updates that would re-download
