@@ -88,7 +88,7 @@ jobs:
           echo "### Layer breakdown" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "$MANIFEST" | jq -r '.layers[] | "\(.size / 1024 / 1024 | floor) MB  \(.digest[7:19])  \(.mediaType)"' >> "$GITHUB_STEP_SUMMARY"
+          echo "$MANIFEST" | jq -r '.layers[] | "\(.size / 1024 / 1024 * 10 | floor / 10) MB  \(.digest[7:19])  \(.mediaType)"' >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
   build-and-push:
@@ -204,13 +204,30 @@ jobs:
           # Pull the just-pushed manifest so we can sum compressed layer sizes.
           # This is what `docker pull` actually transfers — the number that
           # matters for squirttle's eMMC bandwidth/space.
+          #
+          # buildx with provenance attestations pushes an OCI image INDEX
+          # (manifest list) under the tag, with two manifests inside:
+          #   1. the actual amd64 image
+          #   2. a buildx provenance attestation (platform=unknown/unknown)
+          # We want layer sizes from manifest #1, so resolve the index first.
           TAG="${{ steps.variant.outputs.version_tag }}"
           TOKEN=$(curl -fsSL "https://ghcr.io/token?scope=repository:${{ github.repository }}:pull" | jq -r .token)
-          MANIFEST=$(curl -sSL \
+          INDEX=$(curl -sSL \
             -H "Authorization: Bearer $TOKEN" \
-            -H "Accept: application/vnd.oci.image.manifest.v1+json" \
-            -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
             "https://ghcr.io/v2/${{ github.repository }}/manifests/$TAG")
+          MEDIA=$(echo "$INDEX" | jq -r '.mediaType // empty')
+          if echo "$MEDIA" | grep -qE 'image\.index|manifest\.list'; then
+            # OCI index — resolve the linux/amd64 manifest within.
+            AMD64=$(echo "$INDEX" | jq -r '.manifests[] | select(.platform.architecture=="amd64" and .platform.os=="linux") | .digest' | head -1)
+            MANIFEST=$(curl -sSL \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Accept: application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
+              "https://ghcr.io/v2/${{ github.repository }}/manifests/$AMD64")
+          else
+            # Single-arch manifest pushed directly (no buildx attestation).
+            MANIFEST="$INDEX"
+          fi
           COMPRESSED=$(echo "$MANIFEST" | jq '[.layers[].size] | add')
           COMPRESSED_MB=$(echo "scale=1; $COMPRESSED / 1024 / 1024" | bc)
           LAYERS=$(echo "$MANIFEST" | jq '.layers | length')
@@ -219,10 +236,10 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Tag: \`$TAG\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Dockerfile: \`${{ steps.variant.outputs.dockerfile }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Compressed: **${COMPRESSED_MB} MB** across ${LAYERS} layers" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Compressed (linux/amd64): **${COMPRESSED_MB} MB** across ${LAYERS} layers" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Layer breakdown" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "$MANIFEST" | jq -r '.layers[] | "\(.size / 1024 / 1024 | floor) MB  \(.digest[7:19])"' >> "$GITHUB_STEP_SUMMARY"
+          echo "$MANIFEST" | jq -r '.layers[] | "\(.size / 1024 / 1024 * 10 | floor / 10) MB  \(.digest[7:19])"' >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"

@@ -57,17 +57,68 @@ RUN curl -fsSL \
  && rm /work/sonarr.tar.gz
 
 # Prune step — every byte counts on squirttle's 12 GB eMMC.
-#   - Sonarr.Update*: in-app updater. Updates happen via `docker pull`.
-#   - *.pdb: .NET debug symbols. Stack traces still resolve method names
-#     without them; line numbers are the only thing lost.
-#   - Logs/MediaCovers/.git/.config: shouldn't be present in the tarball
-#     anyway, but belt-and-suspenders.
+# Numbers in parentheses are uncompressed sizes from the v4.0.17.2952
+# linuxmusl-x64 tarball; compressed savings are typically ~30-40 % of those.
+#
+#   - Sonarr.Update* (75 MB): in-app updater bundling its own .NET runtime.
+#     We update via `docker pull`, never via Sonarr's self-update.
+#   - *.pdb (~5 MB): .NET debug symbols. Stack traces still resolve method
+#     names without them; only line numbers are lost.
+#   - *.xml under ref/ (none in v4 tarball, but kept for forward-compat).
+#
+# iter-5 prune levers (all safe on Linux/x64; rationale per file):
+#   - UI/*.map (11 MB): SPA source maps. Used only by browser dev tools to
+#     debug minified JS. Sonarr functionality unaffected.
+#   - ServiceInstall, ServiceUninstall (~160 KB total): Windows service
+#     installer binaries. Never invoked on Linux.
+#   - Microsoft.AspNetCore.Server.HttpSys.dll, Microsoft.AspNetCore.Server.IIS*.dll:
+#     Windows HTTP.SYS / IIS integration. Sonarr uses Kestrel on Linux.
+#   - Microsoft.Win32.Registry.dll, Microsoft.Win32.SystemEvents.dll:
+#     Windows registry / system events. Linux has neither.
+#   - Microsoft.VisualBasic*.dll: VB.NET runtime. Sonarr is C#.
+#   - WindowsBase.dll, System.Windows*.dll: WPF / Windows Forms runtime.
+#   - System.ServiceProcess*.dll: Windows service hosting.
+#   - System.Diagnostics.EventLog.dll, Microsoft.Extensions.Logging.EventLog.dll,
+#     Microsoft.Extensions.Hosting.WindowsServices.dll: Windows-only logging.
+#   - System.Data.SqlServerCe.dll, Microsoft.Data.SqlClient.dll (~1.5 MB):
+#     SQL Server Compact / SQL Server clients. Sonarr uses SQLite (or
+#     optionally PostgreSQL via Npgsql.dll which we keep).
+#
+# What we deliberately DON'T prune (would break things):
+#   - ffprobe (16 MB): Sonarr's media analyzer. Removing it disables
+#     "Analyse video files" — homelab Sonarr uses this for custom format
+#     quality detection. iter-5b (no-ffprobe) is documented in README as
+#     an option for users who don't need media analysis.
+#   - Sonarr.Mono.dll: small (27 KB) shim referenced by Sonarr.deps.json.
+#     Even though we run .NET Core, the deps graph loads it; safer to keep.
+#   - System.Drawing.Common.dll: poster/banner thumbnail generation might
+#     P/Invoke libgdiplus. Untested; kept to be safe.
 RUN set -eux; \
     cd /work/sonarr; \
     rm -rf Sonarr.Update Sonarr.Update.* update; \
     find . -name '*.pdb' -type f -delete; \
     find . -name '*.xml' -path '*/ref/*' -type f -delete 2>/dev/null || true; \
-    rm -rf logs MediaCover .git .github 2>/dev/null || true
+    rm -rf logs MediaCover .git .github 2>/dev/null || true; \
+    # iter-5 prune levers — see comment block above.
+    rm -f UI/*.map; \
+    rm -f ServiceInstall ServiceUninstall; \
+    rm -f Microsoft.AspNetCore.Server.HttpSys.dll \
+          Microsoft.AspNetCore.Server.IIS.dll \
+          Microsoft.AspNetCore.Server.IISIntegration.dll \
+          Microsoft.Win32.Registry.dll \
+          Microsoft.Win32.SystemEvents.dll \
+          Microsoft.VisualBasic.Core.dll \
+          Microsoft.VisualBasic.dll \
+          WindowsBase.dll \
+          System.Windows.dll \
+          System.Windows.Extensions.dll \
+          System.ServiceProcess.dll \
+          System.ServiceProcess.ServiceController.dll \
+          System.Diagnostics.EventLog.dll \
+          Microsoft.Extensions.Hosting.WindowsServices.dll \
+          Microsoft.Extensions.Logging.EventLog.dll \
+          System.Data.SqlServerCe.dll \
+          Microsoft.Data.SqlClient.dll
 
 # Write a package_info file matching LSIO's convention so Sonarr knows it was
 # installed via Docker and disables in-app updates that would re-download
