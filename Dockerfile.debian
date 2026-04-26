@@ -11,7 +11,7 @@ ARG SONARR_VERSION=4.0.17.2952
 ARG SONARR_BRANCH=main
 
 # ---- Stage 1: fetch & unpack ----------------------------------------------
-FROM debian:stable-slim AS fetch
+FROM debian:bookworm-slim AS fetch
 ARG SONARR_VERSION
 ARG SONARR_BRANCH
 
@@ -40,7 +40,7 @@ RUN printf 'UpdateMethod=docker\nBranch=%s\nPackageVersion=%s\nPackageAuthor=[ch
         > /work/sonarr/package_info
 
 # ---- Stage 2: runtime -----------------------------------------------------
-FROM debian:stable-slim
+FROM debian:bookworm-slim
 ARG SONARR_VERSION
 
 LABEL org.opencontainers.image.title="sonarr-alpine (debian variant)"
