@@ -7,7 +7,7 @@
 # The Sonarr tarball used is `os=linux` (glibc), not `os=linuxmusl`. Same
 # self-contained net6 bundle, just compiled against glibc.
 
-ARG SONARR_VERSION=4.0.17.2953
+ARG SONARR_VERSION=4.0.17.2952
 ARG SONARR_BRANCH=main
 
 # ---- Stage 1: fetch & unpack ----------------------------------------------

@@ -19,7 +19,7 @@
 # Build with:  workflow_dispatch  →  dockerfile=Dockerfile.mcr,
 #                                    tag_suffix=iter3-mcr
 
-ARG SONARR_VERSION=4.0.17.2953
+ARG SONARR_VERSION=4.0.17.2952
 ARG SONARR_BRANCH=main
 
 # ---- Stage 1: fetch & unpack ---------------------------------------------

@@ -27,7 +27,7 @@
 #   - Using a numbered, pinned UID/GID baked into the image rather than the
 #     LSIO `abc` user that gets renumbered at runtime by their entrypoint.
 
-ARG SONARR_VERSION=4.0.17.2953
+ARG SONARR_VERSION=4.0.17.2952
 ARG SONARR_BRANCH=main
 
 # ---- Stage 1: fetch & unpack the upstream tarball --------------------------
