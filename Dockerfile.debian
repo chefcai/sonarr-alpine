@@ -1,0 +1,81 @@
+# sonarr-alpine — iter-2 variant: debian:stable-slim + linux-x64 self-contained.
+#
+# This file exists to test the hypothesis that glibc + apt's libsqlite3-0 /
+# libicu* are larger than Alpine's musl variants. Build with:
+#     workflow_dispatch  →  dockerfile=Dockerfile.debian
+#
+# The Sonarr tarball used is `os=linux` (glibc), not `os=linuxmusl`. Same
+# self-contained net6 bundle, just compiled against glibc.
+
+ARG SONARR_VERSION=4.0.17.2953
+ARG SONARR_BRANCH=main
+
+# ---- Stage 1: fetch & unpack ----------------------------------------------
+FROM debian:stable-slim AS fetch
+ARG SONARR_VERSION
+ARG SONARR_BRANCH
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+RUN curl -fsSL \
+        "https://services.sonarr.tv/v1/update/${SONARR_BRANCH}/download?version=${SONARR_VERSION}&os=linux&runtime=netcore&arch=x64" \
+        -o /work/sonarr.tar.gz \
+ && mkdir -p /work/sonarr \
+ && tar xzf /work/sonarr.tar.gz -C /work/sonarr --strip-components=1 \
+ && rm /work/sonarr.tar.gz
+
+RUN set -eux; \
+    cd /work/sonarr; \
+    rm -rf Sonarr.Update Sonarr.Update.* update; \
+    find . -name '*.pdb' -type f -delete; \
+    find . -name '*.xml' -path '*/ref/*' -type f -delete 2>/dev/null || true; \
+    rm -rf logs MediaCover .git .github 2>/dev/null || true
+
+ARG SONARR_VERSION
+RUN printf 'UpdateMethod=docker\nBranch=%s\nPackageVersion=%s\nPackageAuthor=[chefcai/sonarr-alpine](https://github.com/chefcai/sonarr-alpine)\n' \
+        "${SONARR_BRANCH:-main}" "${SONARR_VERSION}" \
+        > /work/sonarr/package_info
+
+# ---- Stage 2: runtime -----------------------------------------------------
+FROM debian:stable-slim
+ARG SONARR_VERSION
+
+LABEL org.opencontainers.image.title="sonarr-alpine (debian variant)"
+LABEL org.opencontainers.image.source="https://github.com/chefcai/sonarr-alpine"
+LABEL org.opencontainers.image.version="${SONARR_VERSION}"
+
+ENV COMPlus_EnableDiagnostics=0 \
+    XDG_CONFIG_HOME=/config/xdg \
+    TZ=UTC \
+    DEBIAN_FRONTEND=noninteractive
+
+# Same dependencies as iter-1 but in apt form. `libicu-dev` is too heavy —
+# `libicu*` matches the runtime libs (libicu72/libicuuc72/...) which is what
+# we actually need.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        libsqlite3-0 \
+        libicu72 \
+        libstdc++6 \
+        ca-certificates \
+        tzdata \
+ && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc /usr/share/man /usr/share/locale/* \
+ && groupadd -g 13000 sonarr \
+ && useradd -u 13001 -g 13000 -d /config -s /usr/sbin/nologin -M sonarr \
+ && mkdir -p /config /app /media \
+ && chown -R sonarr:sonarr /config /app /media
+
+COPY --from=fetch --chown=sonarr:sonarr /work/sonarr /app/sonarr/bin
+
+USER sonarr
+WORKDIR /app/sonarr
+EXPOSE 8989
+
+# wget is not in stable-slim by default; use a TCP probe instead.
+HEALTHCHECK --interval=1m30s --timeout=10s --retries=3 --start-period=60s \
+    CMD bash -c '</dev/tcp/127.0.0.1/8989' || exit 1
+
+CMD ["/app/sonarr/bin/Sonarr", "--data=/config", "--nobrowser"]
