@@ -6,7 +6,7 @@ built on Alpine Linux. Same playbook as
 [`chefcai/seerr-alpine`](https://github.com/chefcai/seerr-alpine), and
 [`chefcai/bazarr-alpine`](https://github.com/chefcai/bazarr-alpine): the image
 is assembled in GitHub Actions and published to `ghcr.io`, so the eMMC-bound
-homelab host (`squirttle`, ~3.9 GB free) never holds intermediate build
+small/resource-constrained homelab hosts never hold intermediate build
 artifacts.
 
 ## Image
@@ -24,7 +24,7 @@ ghcr.io/chefcai/sonarr-alpine:<sonarr-version>   # e.g. 4.0.17.2952
 | `ghcr.io/chefcai/sonarr-alpine:latest`         | **71.86 MB** | **170 MB** | **−15.5 % (compressed)** / **−17.5 % (on-disk)** |
 
 > Compressed size is what `docker pull` actually transfers — the metric that
-> matters for squirttle's eMMC bandwidth/space. The GH workflow's "Report
+> matters on storage-constrained hosts. The GH workflow's "Report
 > final image size" step computes this from the OCI manifest after each
 > push and writes it into the run's job summary.
 
@@ -68,9 +68,9 @@ The wins come from:
   `init: true` for PID 1.
 - **No `xmlstarlet`.** LSIO uses it in init scripts to patch `config.xml`
   based on env vars; we don't have those init scripts.
-- **Fixed UID/GID baked into the image** (13001:13000). LSIO's `abc` user
-  gets renumbered at runtime by their entrypoint based on PUID/PGID env;
-  the chefcai image hardcodes the IDs and chowns at build.
+- **Configurable UID/GID via `PUID`/`PGID`** (default 1000:1000; remapped
+  at container start by `entrypoint.sh`, `su-exec`-based) — same runtime
+  behavior as LSIO's `abc` user, without the s6-overlay.
 - **No `Sonarr.Update` binary** (75 MB uncompressed) — in-app updates aren't
   used because we update via `docker pull`.
 - **No `*.pdb`** debug symbols, `*.xml` ref docs.
@@ -105,7 +105,7 @@ is Sonarr + bundled .NET 6; the rest is baseimage-alpine + s6 + LSIO tooling.
 | **Date** | 2026-04-25 |
 | **Compressed** | **74.5 MB** (4 layers) — **−12.4 %** vs iter-0 |
 | **Base** | `alpine:3.21` only |
-| **Layout** | multi-stage: stage 1 fetches and unpacks the Sonarr tarball from `services.sonarr.tv`, prunes `Sonarr.Update*` (75 MB) + `*.pdb` (~5 MB) + `*/ref/*.xml`. Stage 2 is fresh `alpine:3.21` with `apk add icu-libs sqlite-libs tzdata ca-certificates libstdc++` and the unpacked Sonarr tree at `/app/sonarr/bin`. UID 13001 / GID 13000 baked in. CMD = bundled AppHost binary. |
+| **Layout** | multi-stage: stage 1 fetches and unpacks the Sonarr tarball from `services.sonarr.tv`, prunes `Sonarr.Update*` (75 MB) + `*.pdb` (~5 MB) + `*/ref/*.xml`. Stage 2 is fresh `alpine:3.21` with `apk add icu-libs sqlite-libs tzdata ca-certificates libstdc++ su-exec` and the unpacked Sonarr tree at `/app/sonarr/bin`. UID 13001 / GID 13000 by default, remapped at runtime via PUID/PGID. CMD = bundled AppHost binary via entrypoint.sh. |
 
 Layer breakdown: 3.4 + 5.1 + **65.9** + 0 MB. The 65.9 MB layer is the same
 Sonarr tarball as upstream's 73 MB, minus the prunes.
@@ -171,7 +171,7 @@ be smarter than the .NET deps graph loses.
 | **Compressed** | **71.86 MB** (4 layers) — **−15.5 %** vs iter-0 ✅ |
 | **On-disk** | 170 MB (vs LSIO 206 MB → **−17.5 %**) |
 | **Additional prunes vs iter-1** | `UI/*.map` (11 MB SPA source maps) + `ServiceInstall` / `ServiceUninstall` (160 KB Win-only ELF installers, not referenced by `deps.json` on Linux). |
-| **Verified on squirttle** | 2026-04-25 — boots healthy in 35 s, all 217+ DB migrations applied, `/sonarr/ping` returns 200, `/api/v3/system/status` returns 401 (auth enforced as expected), 74 MB RSS at idle. |
+| **Verified in production** | 2026-04-25 — boots healthy in 35 s, all 217+ DB migrations applied, `/sonarr/ping` returns 200, `/api/v3/system/status` returns 401 (auth enforced as expected), 74 MB RSS at idle. |
 
 Layer breakdown: 3.4 + 5.1 + **63.2** + 0 MB.
 
@@ -203,7 +203,7 @@ to Sonarr's behaviour.
 
 ## Usage
 
-In `~/arrs/docker-compose.yml` on squirttle the `sonarr:` service block is:
+In your `docker-compose.yml` the `sonarr:` service block might look like:
 
 ```yaml
 sonarr:
@@ -211,7 +211,7 @@ sonarr:
   init: true   # chefcai image has no s6-overlay; Docker provides PID 1
   container_name: sonarr
   environment:
-    - TZ=America/New_York
+    - TZ=UTC  # override to your local zone
   healthcheck:
     test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8989/ping"]
     interval: 1m30s
@@ -220,22 +220,25 @@ sonarr:
   ports:
     - "8989:8989"
   volumes:
-    - /home/haadmin/config/sonarr-config:/config
+    - /path/to/sonarr-config:/config
     # …existing media/backup mounts…
   restart: unless-stopped
 ```
 
 Notable differences from the LSIO-style block:
 - `init: true` replaces s6-overlay's PID 1.
-- `PUID=13001` / `PGID=13000` / `UMASK=002` env vars are dropped — UID/GID
-  are baked into the image at build time.
+- `PUID=13001` / `PGID=13000` env vars now work directly (default
+  1000:1000 if unset); `UMASK=002` is still unsupported (LSIO-only) — drop
+  that one.
 - The compose-level `healthcheck:` uses `wget` because `curl` is not in the
   chefcai image. Image-level `HEALTHCHECK` is identical and would suffice
   if you remove the compose-level one entirely.
 
-The bind-mounted `sonarr-config` directory must already be owned `13001:13000`.
-If you're migrating from LSIO with `PUID=13001 PGID=13000`, it already is.
-Otherwise: `sudo chown -R 13001:13000 /home/haadmin/config/sonarr-config`.
+The bind-mounted `sonarr-config` directory must be owned by whatever
+UID/GID you pass via `PUID`/`PGID` (default 1000:1000 if unset). If
+you're migrating from LSIO with `PUID=13001 PGID=13000`, keep those same
+values and it already is. Otherwise: `sudo chown -R 1000:1000
+/path/to/sonarr-config` (or whatever PUID/PGID you set).
 
 ## Build pipeline
 

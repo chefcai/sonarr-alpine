@@ -203,7 +203,7 @@ jobs:
         run: |
           # Pull the just-pushed manifest so we can sum compressed layer sizes.
           # This is what `docker pull` actually transfers — the number that
-          # matters for squirttle's eMMC bandwidth/space.
+          # matters on storage-constrained hosts.
           #
           # buildx with provenance attestations pushes an OCI image INDEX
           # (manifest list) under the tag, with two manifests inside:

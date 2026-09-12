@@ -1,7 +1,7 @@
 # Compose patch for `~/arrs/docker-compose.yml`
 
 After `iter-1` is verified working (see README iteration log), apply this
-patch on squirttle.
+patch on a resource-constrained homelab host.
 
 ## One-line replacement
 
@@ -26,16 +26,17 @@ Docker. Add (or confirm present) at the same indent as `image:`:
     init: true
 ```
 
-Drop the `PUID` and `PGID` env vars from the `sonarr:` block — the chefcai
-image hardcodes UID 13001 / GID 13000 and will ignore those vars. Also drop
-`UMASK` (LSIO-specific).
+Keep the `PUID` and `PGID` env vars in the `sonarr:` block -- the chefcai
+image reads them directly (default 1000:1000 if unset). Drop `UMASK`
+though; that one is LSIO-specific and has no equivalent here.
 
-The bind-mounted config dir must already be owned `13001:13000`. If migrating
-from LSIO with `PUID=13001 PGID=13000`, it already is. To verify and fix
-preemptively (idempotent if already correct):
+The bind-mounted config dir must be owned by whatever UID/GID you set via
+`PUID`/`PGID` (default 1000:1000 if unset). If migrating from LSIO with
+`PUID=13001 PGID=13000`, keep those values and it already is. To verify
+and fix preemptively (idempotent if already correct):
 
 ```bash
-sudo chown -R 13001:13000 /home/haadmin/config/sonarr-config
+sudo chown -R 1000:1000 /path/to/sonarr-config
 ```
 
 ## Resulting block (suggested final state)
@@ -46,9 +47,9 @@ sudo chown -R 13001:13000 /home/haadmin/config/sonarr-config
     container_name: sonarr
     init: true
     environment:
-      - TZ=America/New_York
+      - TZ=UTC  # override to your local zone
     volumes:
-      - /home/haadmin/config/sonarr-config:/config
+      - /path/to/sonarr-config:/config
       - /mnt/Media:/media
     ports:
       - "8989:8989"
@@ -58,7 +59,8 @@ sudo chown -R 13001:13000 /home/haadmin/config/sonarr-config
 ## Rollback
 
 Reverting is one-line — change the `image:` back to
-`lscr.io/linuxserver/sonarr:latest`, re-add `PUID=13001 PGID=13000` env vars,
-remove `init: true` (or leave it; it's compatible with the LSIO image too).
+`lscr.io/linuxserver/sonarr:latest` (the `PUID=13001 PGID=13000` env vars
+can stay, LSIO reads them too), remove `init: true` (or leave it; it's
+compatible with the LSIO image too).
 The `sonarr-config` directory format is identical between the two images,
 so no migration of the SQLite DB or settings is needed.
