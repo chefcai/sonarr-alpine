@@ -3,6 +3,8 @@ name: Build and Push sonarr-alpine Image
 on:
   push:
     branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
   workflow_dispatch:
     # Variant selector: which Dockerfile to build. Used during iteration to
     # compare bases; the published `:latest` tag should always come from
@@ -186,7 +188,7 @@ jobs:
         with:
           context: .
           file: ./${{ steps.variant.outputs.dockerfile }}
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.tags.outputs.tags }}
           build-args: |
             SONARR_VERSION=${{ steps.sonarr_version.outputs.version }}
@@ -199,11 +201,11 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ steps.variant.outputs.dockerfile }}
 
       - name: Report final image size
-        if: github.event_name != 'schedule' || steps.check.outputs.needs_build == 'true'
+        if: github.event_name != 'pull_request' && (github.event_name != 'schedule' || steps.check.outputs.needs_build == 'true')
         run: |
           # Pull the just-pushed manifest so we can sum compressed layer sizes.
           # This is what `docker pull` actually transfers — the number that
-          # matters for squirttle's eMMC bandwidth/space.
+          # matters on storage-constrained hosts.
           #
           # buildx with provenance attestations pushes an OCI image INDEX
           # (manifest list) under the tag, with two manifests inside:

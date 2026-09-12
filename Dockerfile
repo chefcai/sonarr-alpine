@@ -1,7 +1,7 @@
 # sonarr-alpine — minimal Sonarr (v4-stable, .NET 6) image on Alpine.
 #
 # Pattern mirrors chefcai/jellyfin-alpine, chefcai/seerr-alpine, chefcai/bazarr-alpine:
-#   - Build runs in GitHub Actions, not on squirttle's eMMC.
+#   - Build runs in GitHub Actions, not on the deploying host.
 #   - Final image is plain alpine + nodejs/dotnet/etc. + only the runtime
 #     artifacts needed to launch the app.
 #
@@ -56,7 +56,7 @@ RUN curl -fsSL \
  && tar xzf /work/sonarr.tar.gz -C /work/sonarr --strip-components=1 \
  && rm /work/sonarr.tar.gz
 
-# Prune step — every byte counts on squirttle's 12 GB eMMC.
+# Prune step — every byte counts on storage-constrained hosts.
 # Numbers in parentheses are uncompressed sizes from the v4.0.17.2952
 # linuxmusl-x64 tarball; compressed savings are typically ~30-40 % of those.
 #
@@ -66,13 +66,13 @@ RUN curl -fsSL \
 #     names without them; only line numbers are lost.
 #   - *.xml under ref/ (none in v4 tarball, but kept for forward-compat).
 #
-# iter-5 prune levers (only the ones verified safe on squirttle):
+# iter-5 prune levers (only the ones verified safe in production):
 #   - UI/*.map (11 MB): SPA source maps. Used only by browser dev tools to
 #     debug minified JS. Sonarr functionality unaffected.
 #   - ServiceInstall, ServiceUninstall (~160 KB total): Windows service
 #     installer ELF binaries. Not referenced by Sonarr.deps.json on Linux.
 #
-# REJECTED prunes (caused SIGSEGV at startup on squirttle 2026-04-25):
+# REJECTED prunes (caused a SIGSEGV at startup in production, 2026-04-25):
 #   - Microsoft.Win32.Registry.dll, Microsoft.Win32.SystemEvents.dll
 #   - Microsoft.AspNetCore.Server.HttpSys.dll, IIS*.dll
 #   - Microsoft.VisualBasic*.dll, WindowsBase.dll, System.Windows*.dll
@@ -141,15 +141,17 @@ ENV COMPlus_EnableDiagnostics=0 \
 #   - libstdc++:       transitively required by some self-contained .NET 6
 #                      native libs; pulled by icu-libs but listed for clarity.
 #
-# UID/GID 13001:13000 — homelab convention, matches sonarr/radarr/jellyfin/
-# seerr-alpine. Fixed at image build time so config-dir bind mounts already
-# owned 13001:13000 on squirttle Just Work.
+# UID/GID 13001:13000 by default at build time (homelab convention, matches
+# sonarr/radarr/jellyfin/seerr-alpine) -- fully overridable at runtime via
+# the PUID/PGID env vars, see entrypoint.sh and
+# https://github.com/chefcai/sonarr-alpine/issues/1
 RUN apk add --no-cache \
         icu-libs \
         sqlite-libs \
         tzdata \
         ca-certificates \
         libstdc++ \
+        su-exec \
  && addgroup -g 13000 sonarr \
  && adduser -D -u 13001 -G sonarr -h /config -s /sbin/nologin sonarr \
  && mkdir -p /config /app /media \
@@ -157,7 +159,12 @@ RUN apk add --no-cache \
 
 COPY --from=fetch --chown=sonarr:sonarr /work/sonarr /app/sonarr/bin
 
-USER sonarr
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# NOTE: intentionally stays as root here -- entrypoint.sh drops to
+# PUID:PGID (default 1000:1000) via su-exec at container start. See
+# https://github.com/chefcai/sonarr-alpine/issues/1
 WORKDIR /app/sonarr
 EXPOSE 8989
 
@@ -169,4 +176,5 @@ HEALTHCHECK --interval=1m30s --timeout=10s --retries=3 --start-period=60s \
 # Sonarr's bundled AppHost binary launches the .NET runtime and assembly.
 # `--data` points at the per-instance config dir (DB, indexer/profile XML,
 # logs). `--nobrowser` is a no-op in headless mode but signals intent.
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/app/sonarr/bin/Sonarr", "--data=/config", "--nobrowser"]
