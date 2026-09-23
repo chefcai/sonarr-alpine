@@ -156,7 +156,12 @@ jobs:
             UPDATE_LATEST="true"
           else
             if [ -z "$SUFFIX" ]; then
-              SAFE_REF=$(echo "${{ github.ref_name }}" | tr -c 'a-zA-Z0-9._-' '-')
+              # Bash substitution, not `echo ... | tr`: piping echo's own
+              # trailing newline through tr turns it into a literal trailing
+              # "-" that command substitution won't strip (caught during
+              # verification: a real dispatch produced the tag
+              # "4.0.20.3014-branch-verify-tag-safety-").
+              SAFE_REF="${GITHUB_REF_NAME//[^a-zA-Z0-9._-]/-}"
               SUFFIX="branch-${SAFE_REF}"
             fi
             VERSION_TAG="${{ steps.sonarr_version.outputs.version }}-${SUFFIX}"
