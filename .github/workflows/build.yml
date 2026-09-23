@@ -35,6 +35,12 @@ on:
     # Skips automatically if upstream Sonarr v4-stable version is already
     # published — see "Check if image already exists".
     - cron: '0 7 * * *'
+    # Weekly forced rebuild, Sundays at 07:30 UTC. Ignores the
+    # already-published skip so apk/base security fixes land even when
+    # upstream Sonarr hasn't cut a new v4-stable release (HOMELAB-91:
+    # skip-if-version-published means base/apk fixes never land until the
+    # app itself releases).
+    - cron: '30 7 * * 0'
 
 env:
   REGISTRY: ghcr.io
@@ -103,17 +109,27 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve Sonarr v4-stable version from services.sonarr.tv
         id: sonarr_version
         run: |
           # Sonarr's official update service is the source of truth for what
           # "v4-stable latest" is, and it's also what the LSIO image queries.
-          VERSION=$(curl -fsSL "https://services.sonarr.tv/v1/releases" \
-            | jq -r 'first(.[] | select(.releaseChannel=="v4-stable") | .version)')
+          # Retried up to 5 times with backoff — HOMELAB-91: this lookup
+          # failed once on an HTTP 522.
+          VERSION=""
+          for attempt in 1 2 3 4 5; do
+            RESPONSE=$(curl -fsSL --max-time 20 "https://services.sonarr.tv/v1/releases" || true)
+            VERSION=$(echo "$RESPONSE" | jq -r 'first(.[] | select(.releaseChannel=="v4-stable") | .version)' 2>/dev/null || true)
+            if [ -n "$VERSION" ] && [ "$VERSION" != "null" ]; then
+              break
+            fi
+            echo "::warning::Attempt $attempt/5 failed to resolve Sonarr v4-stable version, retrying in $((attempt * 5))s"
+            sleep $((attempt * 5))
+          done
           if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-            echo "::error::Could not resolve Sonarr v4-stable version"
+            echo "::error::Could not resolve Sonarr v4-stable version after 5 attempts"
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -125,16 +141,26 @@ jobs:
           DF="${{ inputs.dockerfile }}"
           [ -z "$DF" ] && DF="Dockerfile"
           SUFFIX="${{ inputs.tag_suffix }}"
-          # Tag scheme: pushes to main and scheduled runs publish :latest +
-          # :<version>. workflow_dispatch with a tag_suffix publishes only
-          # :<version>-<suffix> and does NOT touch :latest — that way iter-2
-          # / iter-3 measurements don't overwrite the production tag.
-          if [ -n "$SUFFIX" ]; then
-            VERSION_TAG="${{ steps.sonarr_version.outputs.version }}-${SUFFIX}"
-            UPDATE_LATEST="false"
-          else
+          # Tag scheme: only the default branch (push/schedule on `main`, or
+          # a workflow_dispatch run against `main` with no suffix) publishes
+          # :latest + :<version>. Any other ref NEVER touches those tags —
+          # even a workflow_dispatch run with no tag_suffix set falls back to
+          # a branch-scoped tag, so a forgotten `-f tag_suffix=` can't
+          # overwrite production. tag_suffix, when given, still wins.
+          IS_MAIN="false"
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            IS_MAIN="true"
+          fi
+          if [ "$IS_MAIN" = "true" ] && [ -z "$SUFFIX" ]; then
             VERSION_TAG="${{ steps.sonarr_version.outputs.version }}"
             UPDATE_LATEST="true"
+          else
+            if [ -z "$SUFFIX" ]; then
+              SAFE_REF=$(echo "${{ github.ref_name }}" | tr -c 'a-zA-Z0-9._-' '-')
+              SUFFIX="branch-${SAFE_REF}"
+            fi
+            VERSION_TAG="${{ steps.sonarr_version.outputs.version }}-${SUFFIX}"
+            UPDATE_LATEST="false"
           fi
           echo "dockerfile=$DF" >> "$GITHUB_OUTPUT"
           echo "version_tag=$VERSION_TAG" >> "$GITHUB_OUTPUT"
@@ -150,7 +176,13 @@ jobs:
             -H "Accept: application/vnd.oci.image.index.v1+json" \
             -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
             "https://ghcr.io/v2/${{ github.repository }}/manifests/$TAG")
-          if [ "$HTTP" = "200" ]; then
+          # A scheduled run on the weekly forced-rebuild cron always builds,
+          # even if this exact tag was already published — that's the point
+          # of the periodic base-refresh (HOMELAB-91).
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "30 7 * * 0" ]; then
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Weekly base-refresh rebuild — forcing build of $TAG regardless of publish state."
+          elif [ "$HTTP" = "200" ]; then
             echo "needs_build=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Tag $TAG already exists — skipping build."
           else
@@ -160,7 +192,7 @@ jobs:
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'schedule' || steps.check.outputs.needs_build == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -179,12 +211,12 @@ jobs:
 
       - name: Set up Docker Buildx
         if: github.event_name != 'schedule' || steps.check.outputs.needs_build == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build and push Docker image
         if: github.event_name != 'schedule' || steps.check.outputs.needs_build == 'true'
         id: build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./${{ steps.variant.outputs.dockerfile }}
@@ -199,6 +231,33 @@ jobs:
           # alpine-base cache on the next push.
           cache-from: type=gha,scope=${{ steps.variant.outputs.dockerfile }}
           cache-to: type=gha,mode=max,scope=${{ steps.variant.outputs.dockerfile }}
+
+      - name: Smoke test — run image and wait for /ping 200
+        if: github.event_name != 'pull_request' && (github.event_name != 'schedule' || steps.check.outputs.needs_build == 'true')
+        run: |
+          # Pull back the tag we just pushed (buildx pushed straight to the
+          # registry rather than loading locally) and boot it once before
+          # trusting it. HOMELAB-91: no pipeline step previously smoke-tested
+          # the image before it went out under :latest.
+          TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.variant.outputs.version_tag }}"
+          docker pull "$TAG"
+          docker run -d --name sonarr-smoke -p 8989:8989 "$TAG"
+          READY="false"
+          for i in $(seq 1 30); do
+            CODE=$(curl -sS -o /dev/null -w "%{http_code}" "http://localhost:8989/ping" || true)
+            if [ "$CODE" = "200" ]; then
+              READY="true"
+              echo "::notice::Smoke test passed after ${i}s — /ping returned 200"
+              break
+            fi
+            sleep 1
+          done
+          docker logs sonarr-smoke || true
+          docker rm -f sonarr-smoke || true
+          if [ "$READY" != "true" ]; then
+            echo "::error::Smoke test failed — /ping never returned 200 within 30s"
+            exit 1
+          fi
 
       - name: Report final image size
         if: github.event_name != 'pull_request' && (github.event_name != 'schedule' || steps.check.outputs.needs_build == 'true')
